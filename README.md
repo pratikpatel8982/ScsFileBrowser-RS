@@ -1,0 +1,65 @@
+# ScsFileBrowser (Rust)
+
+A cross-platform Rust rewrite of [Callum-Bell/ScsFileBrowser](https://github.com/Callum-Bell/ScsFileBrowser):
+a browser for the `.scs` (HashFS v1 and v2), `.zip` and `.mp` archives used by
+Euro Truck Simulator 2 and American Truck Simulator.
+
+## Features
+- Opens a single archive or a whole folder of them, merged into one virtual
+  filesystem (later archives in case-insensitive name order override earlier ones;
+  the Source column shows `name (+N)` when several archives contain a file).
+- Folder and file tables with sortable columns, multi-select (click, Ctrl, Shift).
+- Breadcrumb path bar; click it to type a path. Backspace goes up one level.
+- Extract files or whole folders (background thread, cancellable), with
+  automatic decryption of 3nK-encrypted `.sii` files.
+- "Open" / "Open With" external programs, configured in Settings
+  (programs can be grouped by file extension, drag and drop to organise).
+- Hold Shift while right-clicking for "Copy CityHash Value" and
+  "Copy sub folder/file names".
+- Drag and drop files or folders onto the window to open them.
+- Rosé Pine dark theme, recent-paths menu, and a log file (`log.log`).
+
+## Build
+Requires a recent stable Rust toolchain (https://rustup.rs).
+
+```sh
+cargo build --release
+./target/release/scs-file-browser [path-to-archive-or-folder]
+```
+
+Platform notes:
+- **Windows**: nothing extra. The release binary has no console window.
+- **macOS**: nothing extra.
+- **Linux**: install the usual windowing headers, e.g. on Debian/Ubuntu
+  `sudo apt install libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev`.
+  File dialogs use the xdg-desktop-portal (via `rfd`), so a portal backend
+  (GTK, KDE, ...) must be running.
+
+Headless library only (no GUI dependencies):
+
+```sh
+cargo build --no-default-features
+```
+
+## Test
+```sh
+cargo test                        # everything
+cargo test --no-default-features  # core library only
+```
+The suite builds synthetic HashFS v1/v2 and ZIP archives, and checks the CityHash
+implementation against 609 reference vectors from the C implementation the
+original C# code was derived from.
+
+## Settings and logs
+Stored in the per-user local data directory under `TruckSim/ScsFileBrowser/`: `settings.json`
+(same field names as the original) and `log.log`.
+
+## Known limitations
+- Verified against synthetic archives, not real game archives. HashFS v2
+  metadata handling follows the format as documented/understood; please report any
+  real `.scs` that fails to open.
+- ZIP64 and encrypted ZIP entries are unsupported (same as the original).
+- No OS-level drag-out of files from the window (use Extract).
+- Zstd-compressed entries are detected and reported but not decompressed.
+- GUI testing was done under Xvfb with software rendering on Linux only;
+  Windows and macOS builds are untested here (CI workflow included).
