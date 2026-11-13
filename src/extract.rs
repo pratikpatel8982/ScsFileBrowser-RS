@@ -159,6 +159,32 @@ pub fn extract_files(
     stats
 }
 
+/// Extract `paths` (full archive paths) for dragging them out of the window.
+///
+/// Each file is written to `out_dir/<archive path>` so the dropped file keeps its
+/// plain name (`def/economy_data.sii` is dropped as `economy_data.sii`) while files
+/// with the same name from different folders don't overwrite each other.
+/// Returns the paths that were written, in order, and how many failed.
+pub fn extract_for_drag(vfs: &Vfs, paths: &[String], out_dir: &Path) -> (Vec<PathBuf>, usize) {
+    let mut written = Vec::new();
+    let mut failed = 0;
+    for path in paths {
+        let Some(file) = vfs.file(path) else {
+            log::error!("Could not find file '{path}' to drag out");
+            failed += 1;
+            continue;
+        };
+        match extract_file(&file, out_dir, path, Some(path)) {
+            Ok(p) => written.push(p),
+            Err(e) => {
+                log::error!("Could not extract the file '{path}' for dragging: {e}");
+                failed += 1;
+            }
+        }
+    }
+    (written, failed)
+}
+
 /// Text for "Copy sub folder/file names": a header per folder followed by its
 /// sorted sub-folders and files as absolute archive paths. When the mounted
 /// archives look like ETS2/ATS, the game and version are included in the header.

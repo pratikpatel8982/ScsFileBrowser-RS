@@ -22,7 +22,7 @@ required-features = ["gui"]
 default = ["gui"]
 # The graphical front-end. Disable (`--no-default-features`) to build only the
 # archive/virtual-filesystem library, e.g. for headless CI.
-gui = ["dep:eframe", "dep:egui_extras", "dep:rfd"]
+gui = ["dep:eframe", "dep:egui_extras", "dep:rfd", "dep:drag", "dep:x11rb", "dep:raw-window-handle"]
 
 [dependencies]
 flate2 = "1.1"
@@ -44,6 +44,16 @@ eframe = { version = "0.37", optional = true, default-features = false, features
 ] }
 egui_extras = { version = "0.37", optional = true }
 rfd = { version = "0.18", optional = true }
+
+# Starting an OS-level file drag out of the window. The crate can only attach to a
+# Win32 / AppKit window handle (on Linux it needs GTK, which eframe doesn't use).
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+drag = { version = "2.1", optional = true }
+
+# Linux/BSD: the drag source is implemented directly on X11 (XDND), see `app/xdnd.rs`.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = { version = "0.13", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

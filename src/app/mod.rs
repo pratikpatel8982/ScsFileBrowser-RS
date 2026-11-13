@@ -1,9 +1,12 @@
 //! The graphical front-end (egui / eframe).
 
+mod dragout;
 mod list;
 mod pathbar;
 mod settings_ui;
 mod theme;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod xdnd;
 
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -93,7 +96,8 @@ enum Dialog {
 enum Action {
     OpenFileDialog,
     OpenFolderDialog,
-    OpenPath(PathBuf),
+    /// An archive dropped onto the window.
+    DropArchive(PathBuf),
     OpenRecent(String),
     OpenSettings,
     Navigate(String),
@@ -105,6 +109,8 @@ enum Action {
     ExtractFolders(Vec<String>),
     ExtractFiles(Vec<String>),
     OpenFiles(Vec<String>, Option<usize>),
+    /// Start an OS drag of these files (full archive paths) out of the window.
+    DragOut(Vec<String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -117,6 +123,7 @@ enum RowEvent {
     Click(usize, Modifiers),
     Activate(usize),
     RightClick(usize),
+    DragStart(usize),
 }
 
 /// What the context menu of a list currently applies to.
@@ -161,6 +168,10 @@ pub struct ScsApp {
     settings_win: Option<SettingsWindow>,
 
     pending_open: Option<PathBuf>,
+    /// Files to drag out of the window, started at the end of the frame (needs the window handle).
+    pending_drag: Option<Vec<String>>,
+    /// The OS drag swallowed the mouse-up, so egui is told about it on the next frame.
+    release_pending: bool,
     allow_close: bool,
     title: String,
 }
@@ -213,6 +224,8 @@ impl ScsApp {
             dialogs: Vec::new(),
             settings_win: None,
             pending_open: initial,
+            pending_drag: None,
+            release_pending: false,
             allow_close: false,
             title: APP_NAME.to_string(),
         }
@@ -459,6 +472,57 @@ impl ScsApp {
         }
     }
 
+    /// A file dropped onto the window. Like the original, only archive files with an
+    /// allowed extension are accepted (folders are opened via File > Open Folder).
+    fn open_drop(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if path.is_file() && has_archive_extension(&path) {
+            log::debug!("Dropped archive '{}'", path.display());
+            self.start_load(ctx, path);
+        } else {
+            let err = format!(
+                "File '{}' did not have an allowed file extension ({})",
+                path.display(),
+                ALLOWED_EXTENSIONS.join(", ")
+            );
+            log::error!("{err}");
+            self.message("Invalid file type", err);
+        }
+    }
+
+    /// Extract the dragged files to a temp folder and hand them to the OS drag loop.
+    /// Blocks until the user drops or cancels, like the original's `DoDragDrop`.
+    fn drag_out(&mut self, ctx: &egui::Context, frame: &eframe::Frame, paths: Vec<String>) {
+        let dir = temp_dir().join("drag");
+        let (files, failed) = extract::extract_for_drag(&self.vfs, &paths, &dir);
+        if files.is_empty() {
+            self.fail("Could not extract the file(s) to drag out".to_string());
+            return;
+        }
+        log::debug!(
+            "Drag dropping {} file(s): {}",
+            files.len(),
+            files
+                .iter()
+                .map(|f| f.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if failed > 0 {
+            self.set_status(format!(
+                "{failed} file(s) could not be extracted for dragging"
+            ));
+        }
+        match dragout::start(frame, files) {
+            Ok(()) => {
+                if dragout::BLOCKING {
+                    self.release_pending = true;
+                    ctx.request_repaint();
+                }
+            }
+            Err(e) => self.fail(format!("Could not drag the file(s): {e}")),
+        }
+    }
+
     // ----- extraction ------------------------------------------------------
 
     fn export_dir_dialog(&self) -> Option<PathBuf> {
@@ -676,7 +740,7 @@ impl ScsApp {
         match action {
             Action::OpenFileDialog => self.open_file_dialog(ctx),
             Action::OpenFolderDialog => self.open_folder_dialog(ctx),
-            Action::OpenPath(p) => self.open_dropped(ctx, p),
+            Action::DropArchive(p) => self.open_drop(ctx, p),
             Action::OpenRecent(p) => self.open_recent(ctx, &p),
             Action::OpenSettings => {
                 if self.settings_win.is_none() {
@@ -731,6 +795,19 @@ impl ScsApp {
                     self.open_files(&paths, program);
                 }
             }
+            Action::DragOut(paths) => {
+                if self.check_loading() {
+                    return;
+                }
+                if self.extracting {
+                    self.message(
+                        "ScsFileBrowser",
+                        "Cannot extract file(s) when an extraction is running.",
+                    );
+                    return;
+                }
+                self.pending_drag = Some(paths);
+            }
         }
     }
 
@@ -766,7 +843,7 @@ impl eframe::App for ScsApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let mut actions: Vec<Action> = Vec::new();
 
@@ -779,7 +856,7 @@ impl eframe::App for ScsApp {
                 .collect()
         });
         if let Some(first) = dropped.into_iter().next() {
-            actions.push(Action::OpenPath(first));
+            actions.push(Action::DropArchive(first));
         }
 
         // ----- top: menu -----
@@ -904,7 +981,7 @@ impl eframe::App for ScsApp {
             painter.text(
                 screen.center(),
                 egui::Align2::CENTER_CENTER,
-                "Drop an archive (.scs, .zip, .mp) or a folder to open it",
+                "Drop an archive (.scs, .zip, .mp) to open it",
                 FontId::proportional(22.0),
                 theme::TEXT,
             );
@@ -937,6 +1014,25 @@ impl eframe::App for ScsApp {
         for action in actions {
             self.handle(&ctx, action);
         }
+
+        if let Some(paths) = self.pending_drag.take() {
+            self.drag_out(&ctx, frame, paths);
+        }
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // The OS drag loop consumed the mouse-up that ended the drag; without it egui
+        // would keep treating the button as held (no hover, stuck drag state).
+        if std::mem::take(&mut self.release_pending) {
+            if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
+                raw_input.events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                });
+            }
+        }
     }
 }
 
@@ -967,7 +1063,7 @@ fn apply_row_events<T, C: Copy + PartialEq>(model: &mut ListModel<T, C>, events:
         match ev {
             RowEvent::Click(i, mods) => model.sel.click(*i, &refs, *mods),
             RowEvent::RightClick(i) => model.sel.right_click(*i, &refs),
-            RowEvent::Activate(_) => {}
+            RowEvent::Activate(_) | RowEvent::DragStart(_) => {}
         }
     }
 }
@@ -1115,7 +1211,11 @@ impl ScsApp {
                 let sort = model.sort;
                 TableBuilder::new(ui)
                     .id_salt("file_table")
-                    .sense(Sense::click())
+                    .sense(if dragout::SUPPORTED {
+                        Sense::click_and_drag()
+                    } else {
+                        Sense::click()
+                    })
                     .resizable(true)
                     .auto_shrink([false, false])
                     .min_scrolled_height(0.0)
@@ -1164,6 +1264,11 @@ impl ScsApp {
                             if resp.secondary_clicked() {
                                 events.push(RowEvent::RightClick(i));
                             }
+                            if dragout::SUPPORTED
+                                && resp.drag_started_by(egui::PointerButton::Primary)
+                            {
+                                events.push(RowEvent::DragStart(i));
+                            }
                             resp.context_menu(|ui| file_menu(ui, &menu, actions));
                         });
                     });
@@ -1184,6 +1289,27 @@ impl ScsApp {
             }
         }
         apply_row_events(&mut self.files, &events);
+        if let Some(RowEvent::DragStart(i)) =
+            events.iter().find(|e| matches!(e, RowEvent::DragStart(..)))
+        {
+            // Dragging an unselected row drags just that row; dragging part of a
+            // selection drags the whole selection.
+            let names: Vec<String> = self
+                .files
+                .display_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            self.files.sel.right_click(*i, &refs);
+            let paths = self
+                .files
+                .selected_names()
+                .iter()
+                .map(|n| self.full_path(n))
+                .collect();
+            actions.push(Action::DragOut(paths));
+        }
 
         if bg.clicked() {
             self.files.sel.clear();

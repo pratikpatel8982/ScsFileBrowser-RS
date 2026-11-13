@@ -4,7 +4,8 @@ use std::sync::atomic::AtomicBool;
 
 use common::*;
 use scs_file_browser::extract::{
-    extract_file, extract_files, extract_folder, folder_contents_as_text, ExtractStats,
+    extract_file, extract_files, extract_folder, extract_for_drag, folder_contents_as_text,
+    ExtractStats,
 };
 use scs_file_browser::fs::{Archive, ArchiveKind, Vfs};
 use scs_file_browser::util::SII_3NK_MAGIC;
@@ -405,6 +406,30 @@ fn extract_files_list_and_missing() {
         }
     );
     assert!(out.path().join("version.txt").is_file());
+}
+
+#[test]
+fn extract_for_drag_keeps_plain_names_and_reports_failures() {
+    let (_d, vfs) = vfs_of(&sample());
+    let out = tempfile::tempdir().unwrap();
+    let (written, failed) = extract_for_drag(
+        &vfs,
+        &[
+            "def/readme.txt".into(),
+            "def/vehicle/truck/a.sii".into(),
+            "nope.txt".into(),
+        ],
+        out.path(),
+    );
+    assert_eq!(failed, 1);
+    assert_eq!(written.len(), 2);
+    // The dropped item's file name is the plain name, not `def+readme.txt`.
+    assert_eq!(written[0].file_name().unwrap(), "readme.txt");
+    assert_eq!(written[1].file_name().unwrap(), "a.sii");
+    assert!(written
+        .iter()
+        .all(|p| p.is_file() && p.starts_with(out.path())));
+    assert_eq!(std::fs::read(&written[1]).unwrap(), b"SiiNunit {}");
 }
 
 #[test]
