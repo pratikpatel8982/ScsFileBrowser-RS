@@ -950,7 +950,12 @@ impl eframe::App for ScsApp {
         // ----- keyboard -----
         let typing = ctx.egui_wants_keyboard_input();
         if !typing && self.dialogs.is_empty() && self.settings_win.is_none() {
-            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Backspace)) {
+            // Backspace, Alt+Left and the mouse "back" button all go up one level.
+            if ctx.input_mut(|i| {
+                i.consume_key(Modifiers::NONE, Key::Backspace)
+                    | i.consume_key(Modifiers::ALT, Key::ArrowLeft)
+            }) || ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra1))
+            {
                 actions.push(Action::GoUp);
             }
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
@@ -1081,6 +1086,9 @@ impl ScsApp {
 
         let mut events: Vec<RowEvent> = Vec::new();
         let mut header_click: Option<FolderCol> = None;
+        let mut up_clicked = false;
+        // A pinned ".." row goes up one level; it isn't part of the sorted/selectable list.
+        let has_parent = !self.current_path.is_empty();
         {
             let menu = MenuCtx {
                 target: &self.folder_menu,
@@ -1120,8 +1128,23 @@ impl ScsApp {
                         });
                     })
                     .body(|body| {
-                        body.rows(ROW_HEIGHT, model.order.len(), |mut row| {
-                            let i = row.index();
+                        let offset = usize::from(has_parent);
+                        body.rows(ROW_HEIGHT, model.order.len() + offset, |mut row| {
+                            if has_parent && row.index() == 0 {
+                                row.col(|ui| {
+                                    ui.add(Label::new(
+                                        RichText::new("..").color(theme::FOAM).strong(),
+                                    ));
+                                });
+                                row.col(|_| {});
+                                let resp =
+                                    row.response().on_hover_text("Go up one level (Backspace)");
+                                if resp.double_clicked() {
+                                    up_clicked = true;
+                                }
+                                return;
+                            }
+                            let i = row.index() - offset;
                             let item = &model.items[model.order[i]];
                             row.set_selected(model.sel.contains(&item.name));
                             row.col(|ui| {
@@ -1149,6 +1172,9 @@ impl ScsApp {
 
         if let Some(col) = header_click {
             self.folders.toggle_sort(col);
+        }
+        if up_clicked {
+            actions.push(Action::GoUp);
         }
         if !events.is_empty() {
             self.active = ActiveList::Folders;
