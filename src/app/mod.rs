@@ -1610,6 +1610,21 @@ fn cleanup_temp_dir() {
 
 /// Start `program` with `file` as its argument without waiting for it.
 fn spawn_program(program: &str, file: &Path) -> std::io::Result<()> {
+    // A `.desktop` entry (what the Linux application picker stores) is not executable itself:
+    // run the command it describes.
+    let mut child = if crate::desktop::is_desktop_file(program) {
+        crate::desktop::DesktopEntry::load(Path::new(program))?.launch(file)?
+    } else {
+        spawn_executable(program, file)?
+    };
+    // Reap the child when it exits so it doesn't linger as a zombie on Unix.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+fn spawn_executable(program: &str, file: &Path) -> std::io::Result<std::process::Child> {
     use std::process::Command;
 
     #[cfg(target_os = "macos")]
@@ -1630,10 +1645,5 @@ fn spawn_program(program: &str, file: &Path) -> std::io::Result<()> {
         c
     };
 
-    let mut child = cmd.spawn()?;
-    // Reap the child when it exits so it doesn't linger as a zombie on Unix.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    cmd.spawn()
 }

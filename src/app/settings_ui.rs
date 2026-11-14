@@ -5,29 +5,51 @@ use std::path::Path;
 use eframe::egui::{self, Align2, Id, Modal, RichText, ScrollArea, Sense, TextEdit};
 
 use super::theme;
+#[cfg(all(unix, not(target_os = "macos")))]
+use crate::desktop::{self, DesktopEntry};
 use crate::settings::{ExtensionSetting, Program, SettingsStore};
 
 const HELP_TEXT: &str = "- Drag an extension to a program to assign it to the program.\n\
-- Right click on an extension or program for options to rename or delete it.";
+- Right click on an extension or program for options to rename or delete it.\n\
+- Changes are saved automatically.";
 
 enum Dialog {
-    Message { title: &'static str, text: String },
-    RenameProgram { old: String, text: String },
-    RenameExtension { old: String, text: String },
-    AddProgram { path: String, name: String },
-    AddExtension { text: String, program: String },
+    Message {
+        title: &'static str,
+        text: String,
+    },
+    RenameProgram {
+        old: String,
+        text: String,
+    },
+    RenameExtension {
+        old: String,
+        text: String,
+    },
+    AddProgram {
+        path: String,
+        name: String,
+    },
+    AddExtension {
+        text: String,
+        program: String,
+    },
     DeleteProgram(String),
     DeleteExtension(String),
-    Unsaved,
+    /// Linux/BSD: choose among the installed applications.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    PickApp {
+        apps: Vec<DesktopEntry>,
+        filter: String,
+        selected: Option<usize>,
+    },
 }
 
 #[derive(Default)]
 pub struct SettingsWindow {
-    /// Unsaved changes exist.
-    pending: bool,
+    /// The settings changed this frame; they are written to disk straight away.
+    dirty: bool,
     dialog: Option<Dialog>,
-    /// Set once the user has resolved the "unsaved changes" prompt and the window should go away.
-    closing: bool,
 }
 
 impl SettingsWindow {
@@ -44,17 +66,12 @@ impl SettingsWindow {
 
         self.show_dialog(ctx, store);
 
-        if self.closing {
-            return false;
+        // Every change is saved as soon as it is made.
+        if std::mem::take(&mut self.dirty) {
+            store.save();
         }
-        if !open {
-            if self.pending {
-                self.dialog = Some(Dialog::Unsaved);
-                return true;
-            }
-            return false;
-        }
-        true
+
+        open
     }
 
     fn body(&mut self, ui: &mut egui::Ui, store: &mut SettingsStore) {
@@ -74,10 +91,6 @@ impl SettingsWindow {
                         program: store.settings.programs[0].name.clone(),
                     });
                 }
-            }
-            if ui.button("Save").clicked() {
-                self.pending = false;
-                store.save();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let help = ui.label(RichText::new("(?)").color(theme::GOLD));
@@ -170,7 +183,7 @@ impl SettingsWindow {
                         program
                     );
                     e.default_program = program;
-                    self.pending = true;
+                    self.dirty = true;
                 }
             }
         }
@@ -213,21 +226,31 @@ impl SettingsWindow {
         }
     }
 
+    /// "Add Program": on Linux/BSD pick from the installed applications (there is no
+    /// "program file" to browse for there), elsewhere browse for the executable.
     fn add_program_flow(&mut self) {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            self.dialog = Some(Dialog::PickApp {
+                apps: desktop::installed_apps(),
+                filter: String::new(),
+                selected: None,
+            });
+        }
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        self.browse_for_program();
+    }
+
+    fn browse_for_program(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Select a program")
             .pick_file()
         else {
             return;
         };
-        let name = Path::new(&path)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        self.dialog = Some(Dialog::AddProgram {
-            path: path.to_string_lossy().into_owned(),
-            name,
-        });
+        let path = path.to_string_lossy().into_owned();
+        let name = default_program_name(&path);
+        self.dialog = Some(Dialog::AddProgram { path, name });
     }
 
     fn show_dialog(&mut self, ctx: &egui::Context, store: &mut SettingsStore) {
@@ -272,7 +295,7 @@ impl SettingsWindow {
                         if let Some(p) = settings.programs.iter_mut().find(|p| p.name == old) {
                             p.name = new;
                         }
-                        self.pending = true;
+                        self.dirty = true;
                     }
                 } else if !cancel {
                     keep = Some(Dialog::RenameProgram { old, text });
@@ -293,7 +316,7 @@ impl SettingsWindow {
                         if let Some(e) = settings.extensions.iter_mut().find(|e| e.name == old) {
                             e.name = new;
                         }
-                        self.pending = true;
+                        self.dirty = true;
                     }
                 } else if !cancel {
                     keep = Some(Dialog::RenameExtension { old, text });
@@ -309,17 +332,14 @@ impl SettingsWindow {
                 );
                 if ok {
                     let name = if name.trim().is_empty() {
-                        Path::new(&path)
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_default()
+                        default_program_name(&path)
                     } else {
                         name.trim().to_string()
                     };
                     if !settings.programs.iter().any(|p| p.path == path) {
                         log::debug!("Adding new program '{name}' with path '{path}'");
                         settings.programs.push(Program { name, path });
-                        store.save();
+                        self.dirty = true;
                     }
                 } else if !cancel {
                     keep = Some(Dialog::AddProgram { path, name });
@@ -371,11 +391,123 @@ impl SettingsWindow {
                                 name: ext,
                                 default_program: program,
                             });
-                            store.save();
+                            self.dirty = true;
                         }
                     }
                 } else if !cancel {
                     keep = Some(Dialog::AddExtension { text, program });
+                }
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            Dialog::PickApp {
+                apps,
+                mut filter,
+                mut selected,
+            } => {
+                enum Outcome {
+                    Pick(usize),
+                    Browse,
+                    Cancel,
+                }
+                let mut outcome = None;
+                let r = Modal::new(id).show(ctx, |ui| {
+                    ui.set_width(380.0);
+                    ui.heading("Add a program");
+                    ui.label("Choose an installed application");
+                    let search = ui.add(
+                        TextEdit::singleline(&mut filter)
+                            .hint_text("Search")
+                            .desired_width(f32::INFINITY),
+                    );
+                    if !search.has_focus() && filter.is_empty() {
+                        search.request_focus();
+                    }
+                    let needle = filter.trim().to_lowercase();
+                    let shown: Vec<usize> = (0..apps.len())
+                        .filter(|&i| {
+                            needle.is_empty()
+                                || apps[i].name.to_lowercase().contains(&needle)
+                                || apps[i].comment.to_lowercase().contains(&needle)
+                        })
+                        .collect();
+                    if selected.is_some_and(|s| !shown.contains(&s)) {
+                        selected = None;
+                    }
+                    ui.add_space(4.0);
+                    ScrollArea::vertical()
+                        .max_height(280.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.with_layout(
+                                egui::Layout::top_down_justified(egui::Align::LEFT),
+                                |ui| {
+                                    if shown.is_empty() {
+                                        ui.label(
+                                            RichText::new("No applications found")
+                                                .color(theme::SUBTLE),
+                                        );
+                                    }
+                                    for &i in &shown {
+                                        let app = &apps[i];
+                                        let r = ui
+                                            .selectable_label(
+                                                selected == Some(i),
+                                                app.name.as_str(),
+                                            )
+                                            .on_hover_text(if app.comment.is_empty() {
+                                                app.path.to_string_lossy().into_owned()
+                                            } else {
+                                                format!("{}\n{}", app.comment, app.path.display())
+                                            });
+                                        if r.clicked() {
+                                            selected = Some(i);
+                                        }
+                                        if r.double_clicked() {
+                                            outcome = Some(Outcome::Pick(i));
+                                        }
+                                    }
+                                },
+                            );
+                        });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(selected.is_some(), egui::Button::new("Select"))
+                            .clicked()
+                        {
+                            outcome = selected.map(Outcome::Pick);
+                        }
+                        if ui.button("Browse...").clicked() {
+                            outcome = Some(Outcome::Browse);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            outcome = Some(Outcome::Cancel);
+                        }
+                    });
+                });
+                if r.should_close() && outcome.is_none() {
+                    outcome = Some(Outcome::Cancel);
+                }
+                match outcome {
+                    Some(Outcome::Pick(i)) => {
+                        let app = &apps[i];
+                        keep = Some(Dialog::AddProgram {
+                            path: app.path.to_string_lossy().into_owned(),
+                            name: app.name.clone(),
+                        });
+                    }
+                    Some(Outcome::Browse) => {
+                        self.browse_for_program();
+                        keep = self.dialog.take();
+                    }
+                    Some(Outcome::Cancel) => {}
+                    None => {
+                        keep = Some(Dialog::PickApp {
+                            apps,
+                            filter,
+                            selected,
+                        })
+                    }
                 }
             }
             Dialog::DeleteProgram(name) => {
@@ -399,7 +531,7 @@ impl SettingsWindow {
                         Some(true) => {
                             log::debug!("Deleting program '{name}'");
                             settings.programs.retain(|p| p.name != name);
-                            self.pending = true;
+                            self.dirty = true;
                         }
                         Some(false) => {}
                         None => keep = Some(Dialog::DeleteProgram(name)),
@@ -416,47 +548,10 @@ impl SettingsWindow {
                     Some(true) => {
                         log::debug!("Deleting extension '{name}'");
                         settings.extensions.retain(|e| e.name != name);
-                        self.pending = true;
+                        self.dirty = true;
                     }
                     Some(false) => {}
                     None => keep = Some(Dialog::DeleteExtension(name)),
-                }
-            }
-            Dialog::Unsaved => {
-                // Yes = save and close, No = discard and close, Cancel = keep editing.
-                let mut choice = None;
-                let r = Modal::new(id).show(ctx, |ui| {
-                    ui.heading("Save changes?");
-                    ui.label("There are unsaved changes, do you want to save them?");
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Yes").clicked() {
-                            choice = Some(Some(true));
-                        }
-                        if ui.button("No").clicked() {
-                            choice = Some(Some(false));
-                        }
-                        if ui.button("Cancel").clicked() {
-                            choice = Some(None);
-                        }
-                    });
-                });
-                if r.should_close() && choice.is_none() {
-                    choice = Some(None);
-                }
-                match choice {
-                    Some(Some(true)) => {
-                        store.save();
-                        self.pending = false;
-                        self.closing = true;
-                    }
-                    Some(Some(false)) => {
-                        store.load();
-                        self.pending = false;
-                        self.closing = true;
-                    }
-                    Some(None) => {}
-                    None => keep = Some(Dialog::Unsaved),
                 }
             }
         }
@@ -517,4 +612,18 @@ fn confirm(ctx: &egui::Context, id: Id, title: &str, text: &str) -> Option<bool>
         answer = Some(false);
     }
     answer
+}
+
+/// The name offered for a newly added program: the application's own name for a `.desktop`
+/// entry, otherwise the executable's file name without extension.
+fn default_program_name(path: &str) -> String {
+    if crate::desktop::is_desktop_file(path) {
+        if let Ok(entry) = crate::desktop::DesktopEntry::load(Path::new(path)) {
+            return entry.name;
+        }
+    }
+    Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }

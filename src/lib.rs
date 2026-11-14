@@ -3,6 +3,7 @@
 //! files. The GUI lives in the `scs-file-browser` binary (feature `gui`).
 
 pub mod cityhash;
+pub mod desktop;
 pub mod error;
 pub mod extract;
 pub mod fs;
