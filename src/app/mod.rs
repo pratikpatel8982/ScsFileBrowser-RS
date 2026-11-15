@@ -1,5 +1,6 @@
 //! The graphical front-end (egui / eframe).
 
+mod dialog;
 mod dragout;
 mod list;
 mod pathbar;
@@ -16,8 +17,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Align, Color32, FontId, Id, Key, Label, Layout, Modal, Modifiers, RichText, Sense,
-    TextWrapMode, ViewportCommand,
+    self, Align, Color32, FontId, Id, Key, Label, Layout, Modifiers, RichText, Sense, TextWrapMode,
+    ViewportCommand,
 };
 use egui_extras::{Column, TableBuilder};
 
@@ -1512,53 +1513,37 @@ impl ScsApp {
         let mut outcome = Outcome::None;
         {
             let dialog = &self.dialogs[0];
-            let r = Modal::new(Id::unique("app_dialog")).show(ctx, |ui| {
-                ui.set_max_width(420.0);
-                match dialog {
-                    Dialog::Message { title, text } => {
-                        ui.heading(title);
-                        ui.add_space(4.0);
-                        ui.label(text);
-                        ui.add_space(8.0);
-                        if ui.button("OK").clicked() {
-                            outcome = Outcome::Ok;
+            let (title, text, yes_no): (&str, &str, bool) = match dialog {
+                Dialog::Message { title, text } => (title, text, false),
+                Dialog::ConfirmQuitExtraction => (
+                    "Stop extraction and close?",
+                    "An extraction is still running, are you sure you want to quit?",
+                    true,
+                ),
+                Dialog::ConfirmCleanup => (
+                    "Cleanup temporary files?",
+                    "Do you want to remove all the temporarily extracted files?",
+                    true,
+                ),
+            };
+            let closed = dialog::show(ctx, Id::unique("app_dialog"), title, 420.0, |ui| {
+                ui.label(text);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if yes_no {
+                        if ui.button("Yes").clicked() {
+                            outcome = Outcome::Yes;
                         }
+                        if ui.button("No").clicked() {
+                            outcome = Outcome::No;
+                        }
+                    } else if ui.button("OK").clicked() {
+                        outcome = Outcome::Ok;
                     }
-                    Dialog::ConfirmQuitExtraction => {
-                        ui.heading("Stop extraction and close?");
-                        ui.add_space(4.0);
-                        ui.label("An extraction is still running, are you sure you want to quit?");
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Yes").clicked() {
-                                outcome = Outcome::Yes;
-                            }
-                            if ui.button("No").clicked() {
-                                outcome = Outcome::No;
-                            }
-                        });
-                    }
-                    Dialog::ConfirmCleanup => {
-                        ui.heading("Cleanup temporary files?");
-                        ui.add_space(4.0);
-                        ui.label("Do you want to remove all the temporarily extracted files?");
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Yes").clicked() {
-                                outcome = Outcome::Yes;
-                            }
-                            if ui.button("No").clicked() {
-                                outcome = Outcome::No;
-                            }
-                        });
-                    }
-                }
+                });
             });
-            if matches!(outcome, Outcome::None) && r.should_close() {
-                outcome = match dialog {
-                    Dialog::Message { .. } => Outcome::Ok,
-                    _ => Outcome::No,
-                };
+            if matches!(outcome, Outcome::None) && closed {
+                outcome = if yes_no { Outcome::No } else { Outcome::Ok };
             }
         }
 

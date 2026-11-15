@@ -2,8 +2,9 @@
 
 use std::path::Path;
 
-use eframe::egui::{self, Align2, Id, Modal, RichText, ScrollArea, Sense, TextEdit};
+use eframe::egui::{self, Align2, Id, RichText, ScrollArea, Sense, TextEdit};
 
+use super::dialog;
 use super::theme;
 #[cfg(all(unix, not(target_os = "macos")))]
 use crate::desktop::{self, DesktopEntry};
@@ -379,13 +380,13 @@ impl SettingsWindow {
 
         match dialog {
             Dialog::Message { title, text } => {
-                let r = Modal::new(id).show(ctx, |ui| {
-                    ui.heading(title);
+                let mut ok = false;
+                let closed = dialog::show(ctx, id, title, 380.0, |ui| {
                     ui.label(&text);
                     ui.add_space(8.0);
-                    ui.button("OK").clicked()
+                    ok = ui.button("OK").clicked();
                 });
-                if !(r.inner || r.should_close()) {
+                if !(ok || closed) {
                     keep = Some(Dialog::Message { title, text });
                 }
             }
@@ -468,8 +469,7 @@ impl SettingsWindow {
                 let names: Vec<String> = settings.programs.iter().map(|p| p.name.clone()).collect();
                 let mut ok = false;
                 let mut cancel = false;
-                let r = Modal::new(id).show(ctx, |ui| {
-                    ui.heading("Add a file extension");
+                let closed = dialog::show(ctx, id, "Add a file extension", 340.0, |ui| {
                     ui.label("Enter a file extension (e.g. .sii)");
                     let resp = ui.add(TextEdit::singleline(&mut text).desired_width(260.0));
                     if !resp.has_focus() && text.is_empty() {
@@ -492,7 +492,7 @@ impl SettingsWindow {
                         cancel = ui.button("Cancel").clicked();
                     });
                 });
-                cancel |= r.should_close();
+                cancel |= closed;
                 if ok {
                     let mut ext = text.trim().to_string();
                     if !ext.is_empty() && !program.is_empty() {
@@ -526,9 +526,7 @@ impl SettingsWindow {
                     Cancel,
                 }
                 let mut outcome = None;
-                let r = Modal::new(id).show(ctx, |ui| {
-                    ui.set_width(380.0);
-                    ui.heading("Add a program");
+                let closed = dialog::show(ctx, id, "Add a program", 400.0, |ui| {
                     ui.label("Choose an installed application");
                     let search = ui.add(
                         TextEdit::singleline(&mut filter)
@@ -601,7 +599,7 @@ impl SettingsWindow {
                         }
                     });
                 });
-                if r.should_close() && outcome.is_none() {
+                if closed && outcome.is_none() {
                     outcome = Some(Outcome::Cancel);
                 }
                 match outcome {
@@ -691,8 +689,7 @@ fn text_prompt(
 ) -> (bool, bool) {
     let mut ok = false;
     let mut cancel = false;
-    let r = Modal::new(id).show(ctx, |ui| {
-        ui.heading(title);
+    let closed = dialog::show(ctx, id, title, 340.0, |ui| {
         ui.label(label);
         let resp = ui.add(TextEdit::singleline(text).desired_width(280.0));
         if !resp.has_focus() && !resp.lost_focus() {
@@ -705,15 +702,14 @@ fn text_prompt(
             cancel = ui.button("Cancel").clicked();
         });
     });
-    cancel |= r.should_close();
+    cancel |= closed;
     (ok && !cancel, cancel)
 }
 
 /// Yes/No confirmation. `Some(answer)` once decided, `None` while still open.
 fn confirm(ctx: &egui::Context, id: Id, title: &str, text: &str) -> Option<bool> {
     let mut answer = None;
-    let r = Modal::new(id).show(ctx, |ui| {
-        ui.heading(title);
+    let closed = dialog::show(ctx, id, title, 380.0, |ui| {
         ui.label(text);
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -725,7 +721,7 @@ fn confirm(ctx: &egui::Context, id: Id, title: &str, text: &str) -> Option<bool>
             }
         });
     });
-    if answer.is_none() && r.should_close() {
+    if answer.is_none() && closed {
         answer = Some(false);
     }
     answer
