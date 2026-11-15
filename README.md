@@ -61,12 +61,12 @@ Stored in the per-user local data directory under `TruckSim/ScsFileBrowser/`: `s
 (same field names as the original) and `log.log`.
 
 ## Known limitations
-- Verified against synthetic archives, not real game archives. HashFS v2
-  metadata handling follows the format as documented/understood; please report any
+- HashFS v2 metadata handling follows the format as documented/understood; please report any
   real `.scs` that fails to open.
+- Does not support encrypted SCS archives. [Planned]
 - ZIP64 and encrypted ZIP entries are unsupported (same as the original).
 - Dragging files out on Linux needs X11 (the app uses XWayland on Wayland sessions); there is no drag cursor/preview image on Linux.
 - Large drags extract on the UI thread, so the window pauses until the files are ready.
 - Zstd-compressed entries are detected and reported but not decompressed.
 - GUI testing was done under Xvfb with software rendering on Linux only;
-  Windows and macOS builds are untested here (CI workflow included).
+  Windows and macOS builds are untested here.
