@@ -409,6 +409,8 @@ mod tests {
         assert_eq!(e.name, "org.kde.kate");
     }
 
+    // `file://` URIs of POSIX paths: a Windows path would be rewritten.
+    #[cfg(unix)]
     #[test]
     fn field_codes_are_substituted() {
         let file = Path::new("/tmp/my file.sii");
@@ -455,6 +457,8 @@ mod tests {
         assert!(entry(r#"app "unterminated"#).command_line(file).is_err());
     }
 
+    // `file://` URIs of POSIX paths: a Windows path would be rewritten.
+    #[cfg(unix)]
     #[test]
     fn flatpak_style_exec() {
         let file = Path::new("/tmp/a.sii");
