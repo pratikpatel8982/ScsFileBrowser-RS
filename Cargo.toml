@@ -1,6 +1,6 @@
 [package]
 name = "scs-file-browser"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Browse and extract files from American Truck Simulator / Euro Truck Simulator 2 .scs archives without unpacking the whole archive"
