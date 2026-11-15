@@ -182,6 +182,11 @@ fn pad16(out: &mut Vec<u8>) {
 }
 
 pub fn build_hashfs_v2(files: &[TestFile], salt: u16) -> Vec<u8> {
+    build_hashfs_v2_opts(files, salt, true)
+}
+
+/// `with_root: false` leaves out the root directory listing, as locale.scs does.
+pub fn build_hashfs_v2_opts(files: &[TestFile], salt: u16, with_root: bool) -> Vec<u8> {
     let mut out = vec![0u8; 0x30];
 
     // (hash, is_dir, offset, size, csize)
@@ -212,6 +217,9 @@ pub fn build_hashfs_v2(files: &[TestFile], salt: u16) -> Vec<u8> {
     }
 
     for (dir, (subs, fs)) in build_tree(files).iter() {
+        if !with_root && dir.is_empty() {
+            continue;
+        }
         // u32 count, `count` length bytes, then the names; dirs are '/'-prefixed.
         let mut names: Vec<String> = subs.iter().map(|s| format!("/{s}")).collect();
         names.extend(fs.iter().cloned());

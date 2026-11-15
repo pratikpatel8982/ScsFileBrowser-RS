@@ -8,7 +8,7 @@ use scs_file_browser::extract::{
     ExtractStats,
 };
 use scs_file_browser::fs::{Archive, ArchiveKind, Vfs};
-use scs_file_browser::util::SII_3NK_MAGIC;
+use scs_file_browser::util::{decode_sii, SII_3NK_MAGIC};
 
 /// A small tree used by most tests.
 fn sample() -> Vec<TestFile> {
@@ -81,6 +81,27 @@ fn hashfs_v2_roundtrip() {
     let a = Archive::open(&path).unwrap();
     assert_eq!(a.kind(), ArchiveKind::HashFsV2);
     check_sample(&a);
+}
+
+/// locale.scs has no listing for its root folder; the top level is rebuilt from known names.
+#[test]
+fn hashfs_v2_without_root_listing_is_rebuilt() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = vec![
+        file("locale/common.sui", b"c"),
+        file("locale/en_us/local.sii", b"l"),
+        file("version.txt", b"1"),
+        file("zzz_unknown/x.txt", b"x"),
+    ];
+    for salt in [0u16, 7] {
+        let bytes = build_hashfs_v2_opts(&files, salt, false);
+        let a = Archive::open(write(dir.path(), "locale.scs", &bytes)).unwrap();
+        let root = a.directory("").expect("rebuilt root");
+        assert_eq!(root.sub_dirs, ["locale"]);
+        assert_eq!(root.files, ["version.txt"]);
+        let en = a.directory("locale/en_us").unwrap();
+        assert_eq!(en.files, ["local.sii"]);
+    }
 }
 
 #[test]
@@ -188,6 +209,45 @@ fn zip_empty_files_are_files_not_folders() {
         a.read_entry(a.file_entry("a/empty.txt").unwrap()).unwrap(),
         b""
     );
+}
+
+/// What the game does to locale.scs and similar archives: wreck every local file header (signature,
+/// flags, method, sizes), leaving only the central directory and the name/extra lengths intact.
+fn lock_zip(mut bytes: Vec<u8>) -> Vec<u8> {
+    let sig = [0x50, 0x4b, 0x03, 0x04];
+    let mut i = 0;
+    while i + 30 <= bytes.len() {
+        if bytes[i..i + 4] == sig {
+            bytes[i..i + 4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+            bytes[i + 6..i + 8].copy_from_slice(&[0x01, 0x00]);
+            bytes[i + 8..i + 26].fill(0);
+            i += 30;
+        } else {
+            i += 1;
+        }
+    }
+    bytes
+}
+
+#[test]
+fn locked_zip_with_corrupted_local_headers_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let locked = lock_zip(build_zip(&sample(), &["def/"]));
+    assert_ne!(&locked[..2], b"PK");
+    let a = Archive::open(write(dir.path(), "locale.scs", &locked)).unwrap();
+    assert_eq!(a.kind(), ArchiveKind::Zip);
+    check_sample(&a);
+}
+
+/// A ZIP that was made to start with "SCS#" is not a HashFS archive; fall back to ZIP.
+#[test]
+fn zip_disguised_as_hashfs_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut bytes = lock_zip(build_zip(&sample(), &[]));
+    bytes[..4].copy_from_slice(b"SCS#");
+    let a = Archive::open(write(dir.path(), "x.scs", &bytes)).unwrap();
+    assert_eq!(a.kind(), ArchiveKind::Zip);
+    check_sample(&a);
 }
 
 #[test]
@@ -475,6 +535,49 @@ fn extract_decrypts_3nk_sii() {
     assert_eq!(
         std::fs::read(out.path().join("def/plain.sii")).unwrap(),
         b"SiiNunit"
+    );
+}
+
+/// Encrypt like the game does for `ScsC` SII files: zlib, then AES-256-CBC with PKCS#7 padding.
+fn encrypt_scsc(plain: &[u8]) -> Vec<u8> {
+    use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    const KEY: [u8; 32] = [
+        0x2a, 0x5f, 0xcb, 0x17, 0x91, 0xd2, 0x2f, 0xb6, 0x02, 0x45, 0xb3, 0xd8, 0x36, 0x9e, 0xd0,
+        0xb2, 0xc2, 0x73, 0x71, 0x56, 0x3f, 0xbf, 0x1f, 0x3c, 0x9e, 0xdf, 0x6b, 0x11, 0x82, 0x5a,
+        0x5d, 0x0a,
+    ];
+    let iv = [7u8; 16];
+    let compressed = zlib(plain);
+    let mut buf = compressed.clone();
+    buf.resize(compressed.len() + 16, 0);
+    let cipher = cbc::Encryptor::<aes::Aes256>::new(&KEY.into(), &iv.into())
+        .encrypt_padded_mut::<Pkcs7>(&mut buf, compressed.len())
+        .unwrap()
+        .to_vec();
+    let mut out = b"ScsC".to_vec();
+    out.extend_from_slice(&[0u8; 32]); // HMAC (not checked)
+    out.extend_from_slice(&iv);
+    out.extend_from_slice(&(plain.len() as u32).to_le_bytes());
+    out.extend_from_slice(&cipher);
+    out
+}
+
+#[test]
+fn extract_decrypts_scsc_sii() {
+    let plain = filler(3000);
+    let enc = encrypt_scsc(&plain);
+    assert_eq!(decode_sii(&enc).unwrap(), plain);
+    assert_eq!(decode_sii(b"SiiNunit {}").unwrap(), b"SiiNunit {}");
+    // Truncated / damaged data is an error, not a panic.
+    assert!(decode_sii(&enc[..enc.len() - 5]).is_err());
+    assert!(decode_sii(&enc[..40]).is_err());
+
+    let (_d, vfs) = vfs_of(&[file("def/enc.sii", &enc)]);
+    let out = tempfile::tempdir().unwrap();
+    extract_folder(&vfs, "def", out.path(), &AtomicBool::new(false));
+    assert_eq!(
+        std::fs::read(out.path().join("def/enc.sii")).unwrap(),
+        plain
     );
 }
 

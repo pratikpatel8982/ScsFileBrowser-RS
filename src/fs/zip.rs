@@ -15,7 +15,6 @@ use crate::util::{ensure_local_path, parent_path};
 
 const EOCD_SIG: u32 = 0x0605_4b50;
 const CD_SIG: u32 = 0x0201_4b50;
-const LOCAL_SIG: u32 = 0x0403_4b50;
 const EOCD_MIN: usize = 22;
 
 fn u16_at(b: &[u8], o: usize) -> u16 {
@@ -27,6 +26,9 @@ fn u32_at(b: &[u8], o: usize) -> u32 {
 
 pub(crate) fn open(path: &Path, mut reader: Reader) -> Result<Archive> {
     let len = reader.len();
+    if len < EOCD_MIN as u64 {
+        return Err(Error::invalid("too small to be an archive"));
+    }
     // The end-of-central-directory record sits within the last 64 KiB + 22 bytes
     // (the maximum comment length follows it).
     let tail_len = len.min(0xFFFF + EOCD_MIN as u64);
@@ -53,7 +55,6 @@ pub(crate) fn open(path: &Path, mut reader: Reader) -> Result<Archive> {
         if pos + 46 > cd.len() || u32_at(&cd, pos) != CD_SIG {
             return Err(Error::invalid("corrupt ZIP central directory"));
         }
-        let flags = u16_at(&cd, pos + 8);
         let method = u16_at(&cd, pos + 10);
         let compressed_size = u32_at(&cd, pos + 20) as u64;
         let size = u32_at(&cd, pos + 24) as u64;
@@ -80,22 +81,31 @@ pub(crate) fn open(path: &Path, mut reader: Reader) -> Result<Archive> {
             continue;
         }
 
-        if flags & 1 != 0 {
-            log::warn!("{}: skipping encrypted entry '{name}'", path.display());
-            continue;
-        }
-
-        // The extra field length in the local header may differ from the
-        // central directory's, so read the local header to find the data.
-        let local = reader.read_at(local_offset, 30)?;
-        if u32_at(&local, 0) != LOCAL_SIG {
+        // "Locked" ZIPs (locale.scs and similar) deliberately corrupt their local headers and
+        // set odd flags. Like the game, trust only the central directory, plus the name and
+        // extra field lengths of the local header, which are needed to find where the data starts.
+        let Ok(local) = reader.read_at(local_offset + 26, 4) else {
             log::warn!(
-                "{}: bad local header for '{name}', skipping",
+                "{}: local header of '{name}' is out of range, skipping",
+                path.display()
+            );
+            continue;
+        };
+        let data_offset = local_offset + 30 + u16_at(&local, 0) as u64 + u16_at(&local, 2) as u64;
+        if data_offset > len {
+            log::warn!(
+                "{}: data of '{name}' is out of range, skipping",
                 path.display()
             );
             continue;
         }
-        let data_offset = local_offset + 30 + u16_at(&local, 26) as u64 + u16_at(&local, 28) as u64;
+        // Don't trust the stored compressed size beyond the end of the file.
+        let compressed_size =
+            if compressed_size == 0 && size > 0 || data_offset + compressed_size > len {
+                len - data_offset
+            } else {
+                compressed_size
+            };
 
         let codec = match method {
             0 => Codec::Stored,

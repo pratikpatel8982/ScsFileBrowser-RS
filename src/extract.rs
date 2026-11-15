@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{Error, Result};
 use crate::fs::{FileRef, Vfs};
-use crate::util::{combine_path, decrypt_3nk, is_3nk, safe_join};
+use crate::util::{combine_path, decode_sii, safe_join};
 
 /// Folder (inside the system temp dir) where "open with" and drag-out files go.
 pub fn temp_dir() -> PathBuf {
@@ -21,7 +21,7 @@ const MAX_DEPTH: usize = 128;
 ///
 /// The file is stored under `custom_name` when given (it may contain `/` to
 /// create sub-folders), otherwise as `original_path` with `/` replaced by `+`.
-/// Encrypted (3nK) SII files are decrypted on the way out.
+/// Encrypted SII files (3nK or AES `ScsC`) are decrypted on the way out.
 pub fn extract_file(
     file: &FileRef,
     out_dir: &Path,
@@ -35,11 +35,7 @@ pub fn extract_file(
     let out_path = safe_join(out_dir, &relative)?;
 
     let bytes = file.read()?;
-    let bytes = if is_3nk(&bytes) {
-        decrypt_3nk(&bytes)
-    } else {
-        bytes
-    };
+    let bytes = decode_sii(&bytes)?;
 
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)?;

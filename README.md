@@ -11,7 +11,8 @@ Euro Truck Simulator 2 and American Truck Simulator.
 - Folder and file tables with sortable columns, multi-select (click, Ctrl, Shift).
 - Breadcrumb path bar; click it to type a path. Backspace goes up one level.
 - Extract files or whole folders (background thread, cancellable), with
-  automatic decryption of 3nK-encrypted `.sii` files.
+  automatic decryption of encrypted `.sii` files (3nK and AES `ScsC`).
+- "Locked" ZIP archives such as `locale.scs` (deliberately corrupted local file headers) open like any other.
 - "Open" / "Open With" external programs, configured in Settings
   (programs can be grouped by file extension, drag and drop to organise).
 - Hold Shift while right-clicking for "Copy CityHash Value" and
@@ -63,8 +64,10 @@ Stored in the per-user local data directory under `TruckSim/ScsFileBrowser/`: `s
 ## Known limitations
 - HashFS v2 metadata handling follows the format as documented/understood; please report any
   real `.scs` that fails to open.
-- Does not support encrypted SCS archives. [Planned]
-- ZIP64 and encrypted ZIP entries are unsupported (same as the original).
+- "Locked" ZIPs (`locale.scs`) and encrypted `.sii` files (3nK, `ScsC`) are supported. HashFS entries
+  flagged as encrypted are not decrypted (nothing known to the format documentation or the common
+  extractors does this).
+- ZIP64 is unsupported. Password-protected ZIP entries are not decrypted.
 - Dragging files out on Linux needs X11 (the app uses XWayland on Wayland sessions); there is no drag cursor/preview image on Linux.
 - Large drags extract on the UI thread, so the window pauses until the files are ready.
 - Zstd-compressed entries are detected and reported but not decompressed.

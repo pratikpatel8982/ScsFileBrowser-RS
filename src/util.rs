@@ -1,4 +1,4 @@
-//! Small helpers: path handling, size formatting and 3nK decryption.
+//! Small helpers: path handling, size formatting and SII decryption (3nK and `ScsC`).
 
 use std::path::{Component, Path, PathBuf};
 
@@ -133,6 +133,69 @@ pub fn decrypt_3nk(src: &[u8]) -> Vec<u8> {
         key = key.wrapping_add(1);
     }
     out
+}
+
+/// Magic of an AES-encrypted SII file (`ScsC`).
+const SCSC_MAGIC: &[u8; 4] = b"ScsC";
+
+/// `ScsC` header: magic (4), HMAC (32), IV (16) and the data size (4).
+const SCSC_HEADER_LEN: usize = 56;
+
+/// The AES-256 key all encrypted SII files use.
+const SII_KEY: [u8; 32] = [
+    0x2a, 0x5f, 0xcb, 0x17, 0x91, 0xd2, 0x2f, 0xb6, 0x02, 0x45, 0xb3, 0xd8, 0x36, 0x9e, 0xd0, 0xb2,
+    0xc2, 0x73, 0x71, 0x56, 0x3f, 0xbf, 0x1f, 0x3c, 0x9e, 0xdf, 0x6b, 0x11, 0x82, 0x5a, 0x5d, 0x0a,
+];
+
+/// Whether `data` starts with the `ScsC` magic of an encrypted SII file.
+pub fn is_scsc(data: &[u8]) -> bool {
+    data.starts_with(SCSC_MAGIC)
+}
+
+/// Decrypt an `ScsC` file: AES-256-CBC with a fixed key, then a zlib stream.
+pub fn decrypt_scsc(src: &[u8]) -> Result<Vec<u8>> {
+    use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+
+    if !is_scsc(src) || src.len() < SCSC_HEADER_LEN {
+        return Err(Error::invalid("not an encrypted SII file"));
+    }
+    let iv = &src[36..52];
+    let data_size = u32::from_le_bytes([src[52], src[53], src[54], src[55]]) as usize;
+    let mut buf = src[SCSC_HEADER_LEN..].to_vec();
+    if buf.len() % 16 != 0 {
+        return Err(Error::invalid(
+            "encrypted SII data is not a whole number of blocks",
+        ));
+    }
+    cbc::Decryptor::<aes::Aes256>::new(&SII_KEY.into(), iv.into())
+        .decrypt_padded_mut::<NoPadding>(&mut buf)
+        .map_err(|_| Error::invalid("could not decrypt the SII file"))?;
+
+    // Any padding after the zlib stream is ignored by the decoder.
+    let mut out = Vec::with_capacity(data_size.min(256 * 1024 * 1024));
+    ZlibDecoder::new(buf.as_slice())
+        .read_to_end(&mut out)
+        .map_err(|e| Error::Decompress(format!("encrypted SII: {e}")))?;
+    Ok(out)
+}
+
+/// Turn an encrypted SII (`ScsC`, 3nK, or both layered) into its plain form. Anything else is
+/// returned unchanged.
+pub fn decode_sii(data: &[u8]) -> Result<Vec<u8>> {
+    let mut current = data.to_vec();
+    // A few layers at most; the limit only guards against a pathological file.
+    for _ in 0..4 {
+        if is_scsc(&current) {
+            current = decrypt_scsc(&current)?;
+        } else if is_3nk(&current) {
+            current = decrypt_3nk(&current);
+        } else {
+            break;
+        }
+    }
+    Ok(current)
 }
 
 #[cfg(test)]

@@ -166,6 +166,20 @@ impl std::fmt::Debug for Archive {
     }
 }
 
+/// Top-level folders and files found in the game's archives, probed when an archive has no root
+/// listing.
+const ROOT_DIRS: &[&str] = &[
+    "automat", "custom", "def", "effect", "font", "locale", "map", "material", "model", "model2",
+    "panorama", "prefab", "prefab2", "road", "sound", "system", "ui", "unit", "vehicle", "video",
+    "walls", "world",
+];
+const ROOT_FILES: &[&str] = &[
+    "version.txt",
+    "manifest.sii",
+    "readme.txt",
+    "mod_description.txt",
+];
+
 impl Archive {
     /// Open an archive, detecting its format from its contents.
     pub fn open(path: impl AsRef<Path>) -> Result<Archive> {
@@ -174,15 +188,58 @@ impl Archive {
         let head = reader.read_at(0, reader.len().min(8))?;
         if head.starts_with(b"SCS#") {
             let version = u16::from_le_bytes([head[4], head[5]]);
-            match version {
+            let hashfs = match version {
                 1 => super::hashfs::open_v1(path, reader),
                 2 => super::hashfs::open_v2(path, reader),
                 v => Err(Error::Unsupported(format!("HashFS version {v}"))),
+            };
+            // A ZIP can be made to start with "SCS#"; try that before giving up.
+            return hashfs
+                .map(|mut a| {
+                    a.ensure_root();
+                    a
+                })
+                .or_else(
+                    |e| match Reader::open(path).and_then(|r| super::zip::open(path, r)) {
+                        Ok(zip) => Ok(zip),
+                        Err(_) => Err(e),
+                    },
+                );
+        }
+        // Anything else is taken to be a ZIP: "locked" ZIPs (locale.scs and friends) corrupt their
+        // local headers, so they can't be recognised by a "PK" signature.
+        super::zip::open(path, reader).map_err(|e| match e {
+            Error::InvalidArchive(_) => Error::invalid("not an SCS (HashFS) or ZIP archive"),
+            other => other,
+        })
+    }
+
+    /// Some archives (locale.scs) have no listing for their root folder, and a hash table can't be
+    /// enumerated, so rebuild it by probing the top-level names the game's archives use.
+    fn ensure_root(&mut self) {
+        if self.dirs.contains_key(&self.path_hash("")) {
+            return;
+        }
+        let mut root = Directory::default();
+        for name in ROOT_DIRS {
+            if self.dirs.contains_key(&self.path_hash(name)) {
+                root.sub_dirs.push((*name).to_string());
             }
-        } else if head.starts_with(b"PK") {
-            super::zip::open(path, reader)
-        } else {
-            Err(Error::invalid("not an SCS (HashFS) or ZIP archive"))
+        }
+        for name in ROOT_FILES {
+            if self.files.contains_key(&self.path_hash(name)) {
+                root.files.push((*name).to_string());
+            }
+        }
+        if !root.sub_dirs.is_empty() || !root.files.is_empty() {
+            log::debug!(
+                "{}: no root listing, rebuilt it from {} folder(s) and {} file(s)",
+                self.path.display(),
+                root.sub_dirs.len(),
+                root.files.len()
+            );
+            let hash = self.path_hash("");
+            self.dirs.insert(hash, root);
         }
     }
 
