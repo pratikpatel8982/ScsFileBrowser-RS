@@ -10,7 +10,7 @@ use crate::desktop::{self, DesktopEntry};
 use crate::settings::{ExtensionSetting, Program, SettingsStore};
 
 const HELP_TEXT: &str = "- Drag an extension to a program to assign it to the program.\n\
-- Right click on an extension or program for options to rename or delete it.\n\
+- Use the Rename, Delete and Unassign buttons (or right click) on an extension or program.\n\
 - Changes are saved automatically.";
 
 enum Dialog {
@@ -49,6 +49,8 @@ enum Dialog {
 pub struct SettingsWindow {
     /// The settings changed this frame; they are written to disk straight away.
     dirty: bool,
+    /// An extension whose "Unassign" button was pressed this frame.
+    unassign: Option<String>,
     dialog: Option<Dialog>,
 }
 
@@ -134,27 +136,65 @@ impl SettingsWindow {
                 .collect();
             exts.sort_by(|a, b| super::list::cmp_ignore_case(&a.name, &b.name));
 
-            let frame = egui::Frame::group(ui.style()).inner_margin(4.0);
-            let (_, dropped) = ui.dnd_drop_zone::<String, _>(frame, |ui| {
+            // Highlight the card an extension is being dragged over.
+            let rect_id = Id::unique(("program_rect", &program.name));
+            let hovered = egui::DragAndDrop::has_payload_of_type::<String>(ui.ctx())
+                && ui
+                    .ctx()
+                    .data(|d| d.get_temp::<egui::Rect>(rect_id))
+                    .zip(ui.ctx().pointer_hover_pos())
+                    .is_some_and(|(r, p)| r.contains(p));
+            let frame = card_frame(hovered);
+            let (resp, dropped) = ui.dnd_drop_zone::<String, _>(frame, |ui| {
                 ui.set_min_width(ui.available_width());
-                let header = egui::CollapsingHeader::new(RichText::new(&program.name).strong())
-                    .id_salt(("program", &program.name))
-                    .default_open(true)
-                    .show(ui, |ui| {
+                let id = ui.make_persistent_id(("program", &program.name));
+                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    true,
+                );
+                state
+                    .show_header(ui, |ui| {
+                        let r = ui
+                            .label(RichText::new(&program.name).strong().size(15.0))
+                            .on_hover_text(&program.path);
+                        r.context_menu(|ui| {
+                            self.item_menu(ui, ItemKind::Program(program.name.clone()))
+                        });
+                        let count = exts.len();
+                        ui.label(
+                            RichText::new(match count {
+                                0 => "no extensions".to_string(),
+                                1 => "1 extension".to_string(),
+                                n => format!("{n} extensions"),
+                            })
+                            .small()
+                            .color(theme::SUBTLE),
+                        );
+                        self.item_buttons(ui, ItemKind::Program(program.name.clone()), false);
+                    })
+                    .body(|ui| {
+                        if exts.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "Drag an extension here to open it with this program",
+                                )
+                                .small()
+                                .italics()
+                                .color(theme::SUBTLE),
+                            );
+                        }
                         for ext in &exts {
-                            self.extension_row(ui, &ext.name);
+                            self.extension_row(ui, &ext.name, true);
                         }
                     });
-                header
-                    .header_response
-                    .clone()
-                    .on_hover_text(&program.path)
-                    .context_menu(|ui| self.item_menu(ui, ItemKind::Program(program.name.clone())));
             });
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(rect_id, resp.response.rect));
             if let Some(ext) = dropped {
                 reassign = Some(((*ext).clone(), program.name.clone()));
             }
-            ui.add_space(2.0);
+            ui.add_space(4.0);
         }
 
         // Extensions pointing at a program that no longer exists would otherwise be invisible.
@@ -167,9 +207,35 @@ impl SettingsWindow {
             .collect();
         if !orphans.is_empty() {
             ui.add_space(6.0);
-            ui.label(RichText::new("No program assigned").color(theme::SUBTLE));
-            for name in &orphans {
-                self.extension_row(ui, name);
+            card_frame(false).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(
+                    RichText::new("Unassigned extensions")
+                        .strong()
+                        .size(15.0)
+                        .color(theme::GOLD),
+                );
+                ui.label(
+                    RichText::new("These open with nothing yet. Drag one onto a program.")
+                        .small()
+                        .color(theme::SUBTLE),
+                );
+                ui.add_space(2.0);
+                for name in &orphans {
+                    self.extension_row(ui, name, false);
+                }
+            });
+        }
+
+        if let Some(ext) = self.unassign.take() {
+            if let Some(e) = store.settings.extensions.iter_mut().find(|e| e.name == ext) {
+                log::debug!(
+                    "Removing the default program '{}' from extension '{}'",
+                    e.default_program,
+                    e.name
+                );
+                e.default_program.clear();
+                self.dirty = true;
             }
         }
 
@@ -189,39 +255,89 @@ impl SettingsWindow {
         }
     }
 
-    fn extension_row(&mut self, ui: &mut egui::Ui, name: &str) {
-        let id = Id::unique(("ext", name));
-        let inner = ui.dnd_drag_source(id, name.to_string(), |ui| {
-            let r = ui.add(egui::Label::new(name).sense(Sense::click()));
-            r.context_menu(|ui| self.item_menu(ui, ItemKind::Extension(name.to_string())));
+    fn extension_row(&mut self, ui: &mut egui::Ui, name: &str, assigned: bool) {
+        ui.horizontal(|ui| {
+            let id = Id::unique(("ext", name));
+            let inner = ui.dnd_drag_source(id, name.to_string(), |ui| {
+                ui.set_min_width(90.0);
+                let r = ui.add(
+                    egui::Label::new(RichText::new(name).monospace().color(theme::TEXT))
+                        .sense(Sense::click()),
+                );
+                r.context_menu(|ui| self.item_menu(ui, ItemKind::Extension(name.to_string())));
+            });
+            inner
+                .response
+                .on_hover_cursor(egui::CursorIcon::Grab)
+                .on_hover_text("Drag onto a program to assign it");
+            self.item_buttons(ui, ItemKind::Extension(name.to_string()), assigned);
         });
-        inner
-            .response
-            .on_hover_text("Drag onto a program to assign it");
+    }
+
+    /// Visible Rename / Delete (and, for assigned extensions, Unassign) buttons, right-aligned in
+    /// the current row. The same actions are in the right-click menu.
+    fn item_buttons(&mut self, ui: &mut egui::Ui, kind: ItemKind, unassignable: bool) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let what = match kind {
+                ItemKind::Program(_) => "program",
+                ItemKind::Extension(_) => "extension",
+            };
+            if text_button(ui, "Delete", theme::LOVE)
+                .on_hover_text(format!("Delete this {what}"))
+                .clicked()
+            {
+                self.delete_dialog(kind.clone());
+            }
+            if text_button(ui, "Rename", theme::FOAM)
+                .on_hover_text(format!("Rename this {what}"))
+                .clicked()
+            {
+                self.rename_dialog(&kind);
+            }
+            if let (true, ItemKind::Extension(name)) = (unassignable, &kind) {
+                if text_button(ui, "Unassign", theme::GOLD)
+                    .on_hover_text(
+                        "Stop opening this extension with the program (keeps the extension)",
+                    )
+                    .clicked()
+                {
+                    self.unassign = Some(name.clone());
+                }
+            }
+        });
+    }
+
+    fn rename_dialog(&mut self, kind: &ItemKind) {
+        self.dialog = Some(match kind {
+            ItemKind::Program(n) => Dialog::RenameProgram {
+                old: n.clone(),
+                text: n.clone(),
+            },
+            ItemKind::Extension(n) => Dialog::RenameExtension {
+                old: n.clone(),
+                text: n.clone(),
+            },
+        });
+    }
+
+    fn delete_dialog(&mut self, kind: ItemKind) {
+        self.dialog = Some(match kind {
+            ItemKind::Program(n) => Dialog::DeleteProgram(n),
+            ItemKind::Extension(n) => Dialog::DeleteExtension(n),
+        });
     }
 
     fn item_menu(&mut self, ui: &mut egui::Ui, kind: ItemKind) {
         if ui.button("Rename").clicked() {
-            self.dialog = Some(match &kind {
-                ItemKind::Program(n) => Dialog::RenameProgram {
-                    old: n.clone(),
-                    text: n.clone(),
-                },
-                ItemKind::Extension(n) => Dialog::RenameExtension {
-                    old: n.clone(),
-                    text: n.clone(),
-                },
-            });
+            self.rename_dialog(&kind);
             ui.close();
         }
         if ui
             .button(RichText::new("Delete").color(theme::LOVE))
             .clicked()
         {
-            self.dialog = Some(match kind {
-                ItemKind::Program(n) => Dialog::DeleteProgram(n),
-                ItemKind::Extension(n) => Dialog::DeleteExtension(n),
-            });
+            self.delete_dialog(kind);
             ui.close();
         }
     }
@@ -559,6 +675,7 @@ impl SettingsWindow {
     }
 }
 
+#[derive(Clone)]
 enum ItemKind {
     Program(String),
     Extension(String),
@@ -626,4 +743,34 @@ fn default_program_name(path: &str) -> String {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// The rounded panel each program (and the unassigned list) is drawn in.
+fn card_frame(highlight: bool) -> egui::Frame {
+    egui::Frame::new()
+        .fill(if highlight {
+            theme::HIGHLIGHT_LOW
+        } else {
+            theme::SURFACE
+        })
+        .stroke(egui::Stroke::new(
+            if highlight { 1.5 } else { 1.0 },
+            if highlight {
+                theme::PINE
+            } else {
+                theme::HIGHLIGHT_MED
+            },
+        ))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::symmetric(8, 6))
+}
+
+/// A frameless coloured text button that tints its background on hover.
+fn text_button(ui: &mut egui::Ui, text: &str, color: egui::Color32) -> egui::Response {
+    ui.add(
+        egui::Button::new(RichText::new(text).size(12.5).color(color))
+            .frame_when_inactive(false)
+            .min_size(egui::vec2(0.0, 20.0)),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
